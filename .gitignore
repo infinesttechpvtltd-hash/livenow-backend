@@ -1,0 +1,23 @@
+# Environment
+.env
+.env.local
+.env.production
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.venv/
+
+# Test files
+*_test.py
+test_*.py
+*.test.py
+
+# Migration
+migrate_to_atlas.py
+
+# OS
+.DS_Store
+Thumbs.db

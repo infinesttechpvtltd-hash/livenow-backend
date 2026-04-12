@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+*.pyo
+.env
+.env.local
+.git
+*.md
+venv/
+.venv/
+*.test.py
+migrate_to_atlas.py

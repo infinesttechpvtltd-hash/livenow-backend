@@ -7,4 +7,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-CMD ["sh", "-c", "uvicorn server:app --host 0.0.0.0 --port ${PORT:-8001}"]
+ENV PORT=8001
+
+CMD ["sh", "-c", "python -c \"import os; print('PORT=' + os.environ.get('PORT','8001'))\" && uvicorn server:app --host 0.0.0.0 --port $PORT"]

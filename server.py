@@ -91,6 +91,7 @@ class UserUpdate(BaseModel):
     name: Optional[str] = None
     bio: Optional[str] = None
     profile_photo: Optional[str] = None
+    username: Optional[str] = None
 
 class User(UserBase):
     user_id: str
@@ -102,6 +103,9 @@ class User(UserBase):
     badges: List[str] = []
     subscription_tier: str = "free"  # free, premium, elite
     is_admin: bool = False
+    username: Optional[str] = None
+    name_changes_count: int = 0
+    last_name_change: Optional[datetime] = None
 
 class UserPublic(BaseModel):
     user_id: str
@@ -109,6 +113,7 @@ class UserPublic(BaseModel):
     bio: Optional[str] = ""
     profile_photo: Optional[str] = ""
     badges: List[str] = []
+    username: Optional[str] = None
 
 class AuthResponse(BaseModel):
     user: User
@@ -669,10 +674,43 @@ async def logout(response: Response, current_user: User = Depends(get_current_us
 @api_router.put("/users/me", response_model=User)
 async def update_profile(update_data: UserUpdate, current_user: User = Depends(get_current_user)):
     update_dict = {}
-    if update_data.name is not None:
+    user_doc = await db.users.find_one({"user_id": current_user.user_id})
+    
+    # Name change with limit (max 2 changes per 30 days)
+    if update_data.name is not None and update_data.name != user_doc.get("name"):
+        name_changes = user_doc.get("name_changes_count", 0)
+        last_change = user_doc.get("last_name_change")
+        
+        # Reset counter if last change was more than 30 days ago
+        if last_change and isinstance(last_change, datetime):
+            days_since = (datetime.now(timezone.utc) - last_change.replace(tzinfo=timezone.utc)).days
+            if days_since > 30:
+                name_changes = 0
+        
+        if name_changes >= 2:
+            raise HTTPException(status_code=400, detail="Name change limit reached. You can change your name only 2 times per 30 days.")
+        
         update_dict["name"] = update_data.name
+        update_dict["name_changes_count"] = name_changes + 1
+        update_dict["last_name_change"] = datetime.now(timezone.utc)
+    
     if update_data.bio is not None:
         update_dict["bio"] = update_data.bio
+    
+    # Username — must be unique, lowercase, alphanumeric + underscores, 3-20 chars
+    if update_data.username is not None:
+        import re
+        username = update_data.username.lower().strip()
+        if not re.match(r'^[a-z0-9_]{3,20}$', username):
+            raise HTTPException(status_code=400, detail="Username must be 3-20 characters, only lowercase letters, numbers, and underscores.")
+        
+        # Check uniqueness
+        existing = await db.users.find_one({"username": username, "user_id": {"$ne": current_user.user_id}})
+        if existing:
+            raise HTTPException(status_code=400, detail="This username is already taken. Try another one.")
+        
+        update_dict["username"] = username
+    
     if update_data.profile_photo is not None:
         if update_data.profile_photo.startswith("data:") or len(update_data.profile_photo) > 200:
             update_dict["profile_photo"] = await upload_to_cloudinary(update_data.profile_photo, "livenow/profiles")
@@ -704,11 +742,12 @@ async def search_users(q: str, current_user: User = Depends(get_current_user)):
                 {"user_id": {"$ne": current_user.user_id}},
                 {"$or": [
                     {"name": {"$regex": q, "$options": "i"}},
-                    {"email": {"$regex": q, "$options": "i"}}
+                    {"email": {"$regex": q, "$options": "i"}},
+                    {"username": {"$regex": q, "$options": "i"}}
                 ]}
             ]
         },
-        {"_id": 0, "user_id": 1, "name": 1, "bio": 1, "profile_photo": 1, "badges": 1}
+        {"_id": 0, "user_id": 1, "name": 1, "bio": 1, "profile_photo": 1, "badges": 1, "username": 1}
     ).to_list(20)
     
     return [UserPublic(**user) for user in users]
@@ -2708,6 +2747,46 @@ async def admin_ban_user(user_id: str, admin: User = Depends(get_admin_user)):
     })
 
     return {"message": f"User {'banned' if not is_banned else 'unbanned'}", "is_banned": not is_banned}
+
+# --- Admin Subscription Upgrade ---
+@api_router.post("/admin/users/{user_id}/upgrade")
+async def admin_upgrade_user(user_id: str, request: Request, admin: User = Depends(get_admin_user)):
+    """Upgrade a user's subscription tier to premium or elite"""
+    body = await request.json()
+    tier = body.get("tier", "").lower()
+    
+    if tier not in ["free", "premium", "elite"]:
+        raise HTTPException(status_code=400, detail="Invalid tier. Must be 'free', 'premium', or 'elite'")
+    
+    user_doc = await db.users.find_one({"user_id": user_id})
+    if not user_doc:
+        raise HTTPException(status_code=404, detail="User not found")
+    if user_doc.get("is_admin"):
+        raise HTTPException(status_code=400, detail="Cannot modify admin tier")
+    
+    old_tier = user_doc.get("subscription_tier", "free")
+    
+    await db.users.update_one(
+        {"user_id": user_id},
+        {"$set": {"subscription_tier": tier}}
+    )
+    
+    await db.admin_logs.insert_one({
+        "log_id": f"log_{uuid.uuid4().hex[:12]}",
+        "admin_id": admin.user_id,
+        "action": "upgrade_tier",
+        "target_user_id": user_id,
+        "old_tier": old_tier,
+        "new_tier": tier,
+        "timestamp": datetime.now(timezone.utc),
+    })
+    
+    return {
+        "message": f"User tier changed from '{old_tier}' to '{tier}'",
+        "user_id": user_id,
+        "old_tier": old_tier,
+        "new_tier": tier
+    }
 
 # --- Admin Reports ---
 @api_router.get("/admin/reports")
